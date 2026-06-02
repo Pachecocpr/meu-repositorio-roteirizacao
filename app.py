@@ -36,37 +36,24 @@ def buscar_coordenadas(local, cache_local):
     return None, None
 
 def buscar_partida_com_fallback(endereco_original, cache):
-    """Tenta várias combinações de endereço para garantir que o app nunca trave"""
-    if not endereco_original:
+    """Garante que o app nunca trave, mesmo com textos incompletos ou cortados"""
+    if not endereco_original or len(endereco_original.strip()) < 4:
         return None, None
         
     # 1ª Tentativa: Endereço original completo
     lat, lon = buscar_coordenadas(endereco_original, cache)
     if lat: return lat, lon
     
-    # Limpeza de termos comuns que quebram o Nominatim (ex: "Bairro Indaiá" -> "Indaiá")
-    endereco_limpo = endereco_original.lower().replace("bairro ", "").replace("br-", "rodovia br ")
-    
-    # 2ª Tentativa: Endereço limpo
-    lat, lon = buscar_coordenadas(endereco_limpo, cache)
-    if lat: return lat, lon
-    
-    # 3ª Tentativa: Tenta quebrar por vírgulas e pegar apenas os dados principais (Rua + Cidade)
+    # 2ª Tentativa: Se tiver vírgula, tenta ler apenas o começo (Rua) presumindo BH
     if ',' in endereco_original:
-        partes = endereco_original.split(',')
-        if len(partes) > 1:
-            # Pega a primeira parte (Rua) e a última parte (Cidade)
-            rua_cidade = f"{partes[0].strip()}, {partes[-1].strip()}"
-            lat, lon = buscar_coordenadas(rua_cidade, cache)
-            if lat: return lat, lon
+        rua_suposta = endereco_original.split(',')[0].strip()
+        lat, lon = buscar_coordenadas(f"{rua_suposta}, Belo Horizonte", cache)
+        if lat: return lat, lon
 
-    # 4ª Tentativa (Último caso): Se nada funcionar, puxa BH para não travar o processamento
-    lat, lon = buscar_coordenadas("Belo Horizonte - MG", cache)
-    if lat:
-        st.sidebar.warning("⚠️ Endereço exato não localizado. Usando centro de BH como aproximação.")
-        return lat, lon
-        
-    return None, None
+    # 3ª Tentativa (Segurança absoluta): Evita travar a tela e assume BH padrão
+    lat, lon = -19.9191, -43.9386 # Coordenadas centrais de BH
+    st.sidebar.warning("⚠️ Endereço digitado não foi compreendido pelo mapa. Usando centro de BH como partida padrão.")
+    return lat, lon
 
 def calcular_distancia(lat1, lon1, lat2, lon2):
     r = 6371 
@@ -109,12 +96,12 @@ st.sidebar.header("⚙️ Configurações de Partida")
 endereco_input = st.sidebar.text_input(
     "Digite o endereço completo de partida:", 
     value="", 
-    placeholder="Ex: Rua Boaventura, 401, Indaiá, Belo Horizonte - MG"
+    placeholder="Ex: Rua Boaventura, 401, Belo Horizonte - MG"
 )
 
 lat_origem, lon_origem = None, None
 
-if endereco_input:
+if endereco_input and len(endereco_input.strip()) >= 4:
     cache_partida = {}
     with st.sidebar.spinner("Buscando coordenadas do ponto de partida..."):
         lat_origem, lon_origem = buscar_partida_com_fallback(endereco_input, cache_partida)
@@ -122,7 +109,7 @@ if endereco_input:
     if lat_origem:
         st.sidebar.success("📍 **Origem Definida!**")
 else:
-    st.sidebar.warning("⚠️ Insira um endereço de partida para liberar o processamento.")
+    st.sidebar.warning("⚠️ Insira o endereço de partida acima para liberar o processamento.")
 
 st.sidebar.divider()
 qtd_veiculos = st.sidebar.slider("Quantidade de Veículos Disponíveis:", 1, 20, 3)
@@ -133,7 +120,12 @@ arquivo = st.sidebar.file_uploader("Suba a planilha das Unidades (XLSX)", type=[
 
 df_final = pd.DataFrame()
 
-if arquivo and lat_origem:
+# Se o usuário não digitou nada na barra lateral, usamos o fallback automático para a planilha rodar de qualquer forma
+if arquivo:
+    if not lat_origem:
+        lat_origem, lon_origem = -19.9191, -43.9386 # BH padrão se o campo estiver vazio
+        st.sidebar.info("💡 Iniciado com ponto de partida padrão (Belo Horizonte).")
+
     try:
         df_import = pd.read_excel(arquivo)
         
@@ -153,15 +145,12 @@ if arquivo and lat_origem:
         cache_planilha = {}
         
         for i, r in df_final.iterrows():
-            # Tenta pelo endereço completo
             lt, ln = buscar_coordenadas(r['Endereço completo'], cache_planilha)
             
-            # Segurança extra: se falhar o endereço da planilha, limpa a palavra "bairro" dele
             if not lt and "bairro" in r['Endereço completo'].lower():
                 endereco_limpo_linha = r['Endereço completo'].lower().replace("bairro ", "")
                 lt, ln = buscar_coordenadas(endereco_limpo_linha, cache_planilha)
                 
-            # Se ainda assim falhar, tenta pela região/cidade
             if not lt: 
                 lt, ln = buscar_coordenadas(r['Região'], cache_planilha)
                 
@@ -174,11 +163,8 @@ if arquivo and lat_origem:
     except Exception as e:
         st.error(f"Erro ao processar o arquivo Excel: {e}")
         st.stop()
-elif not arquivo:
+else:
     st.info("👋 Aguardando o upload da planilha Excel (.xlsx) na barra lateral para iniciar o planejamento.")
-    st.stop()
-elif not lat_origem:
-    st.info("💡 Por favor, defina um endereço válido de partida na barra lateral para iniciar.")
     st.stop()
 
 # --- PROCESSAMENTO DE ROTAS POR VEÍCULO ---
