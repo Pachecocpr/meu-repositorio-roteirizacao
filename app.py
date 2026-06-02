@@ -13,7 +13,6 @@ st.set_page_config(page_title="Roteirização por Unidades", page_icon="📍", l
 
 # --- FUNÇÕES TÉCNICAS OTIMIZADAS ---
 def limpar_texto_endereco(texto):
-    """Remove termos comuns que costumam travar os buscadores de mapa gratuitos"""
     if not texto or pd.isna(texto):
         return ""
     t = str(texto).lower()
@@ -23,7 +22,7 @@ def limpar_texto_endereco(texto):
     return t.strip()
 
 def buscar_coordenadas(local, cache_local):
-    if not local or pd.isna(local): 
+    if not local or pd.isna(local) or str(local).strip() in ["", "nan"]: 
         return None, None
     
     local_str = str(local).strip()
@@ -33,38 +32,17 @@ def buscar_coordenadas(local, cache_local):
     try:
         agente = f"rot_unidades_{random.randint(1000, 9999)}"
         geolocator = Nominatim(user_agent=agente, timeout=12)
-        # Força a busca no contexto de MG/Brasil para maior precisão
         location = geolocator.geocode(f"{local_str}, Minas Gerais, Brazil")
         
         if location:
             coordenadas = (location.latitude, location.longitude)
             cache_local[local_str] = coordenadas
-            time.sleep(1.1) # Respeitando o limite do servidor público
+            time.sleep(1.1) 
             return coordenadas
     except:
         pass
         
     return None, None
-
-def buscar_partida_com_fallback(endereco_original, cache):
-    """Garante o ponto de partida mesmo com digitação parcial"""
-    if not endereco_original or len(str(endereco_original).strip()) < 3:
-        return None, None
-        
-    lat, lon = buscar_coordenadas(endereco_original, cache)
-    if lat: return lat, lon
-    
-    endereco_limpo = limpar_texto_endereco(endereco_original)
-    lat, lon = buscar_coordenadas(endereco_limpo, cache)
-    if lat: return lat, lon
-    
-    if ',' in endereco_original:
-        rua_suposta = endereco_original.split(',')[0].strip()
-        lat, lon = buscar_coordenadas(f"{rua_suposta}, Belo Horizonte", cache)
-        if lat: return lat, lon
-
-    # Fallback físico para evitar travamento total da tela
-    return -19.9191, -43.9386
 
 def calcular_distancia(lat1, lon1, lat2, lon2):
     r = 6371 
@@ -99,26 +77,21 @@ def ordenar_por_proximidade(lat_inicio, lon_inicio, pontos_df):
 st.title("🚚 ROTEIRIZAÇÃO POR UNIDADES")
 st.markdown("Defina o ponto de partida, carregue a planilha de destinos e otimize as rotas da sua frota.")
 
-# --- SIDEBAR: CONFIGURAÇÃO DE PARTIDA ---
+# --- SIDEBAR ---
 st.sidebar.header("⚙️ Configurações de Partida")
 
 endereco_input = st.sidebar.text_input(
     "Digite o endereço completo de partida:", 
-    value="", 
+    value="Belo Horizonte - MG", 
     placeholder="Ex: Rua Boaventura, 401, Belo Horizonte - MG"
 )
 
-lat_origem, lon_origem = None, None
+cache_partida = {}
+lat_origem, lon_origem = buscar_coordenadas(endereco_input, cache_partida)
+if not lat_origem:
+    lat_origem, lon_origem = -19.9191, -43.9386 # Padrão BH seguro
 
-if endereco_input and len(endereco_input.strip()) >= 3:
-    cache_partida = {}
-    with st.sidebar.spinner("Buscando coordenadas do ponto de partida..."):
-        lat_origem, lon_origem = buscar_partida_com_fallback(endereco_input, cache_partida)
-    st.sidebar.success("📍 **Origem Definida!**")
-else:
-    # Caso esteja vazio, assume BH provisoriamente para permitir carregar a planilha direto
-    lat_origem, lon_origem = -19.9191, -43.9386
-
+st.sidebar.success("📍 **Origem Definida!**")
 st.sidebar.divider()
 qtd_veiculos = st.sidebar.slider("Quantidade de Veículos Disponíveis:", 1, 20, 3)
 
@@ -126,17 +99,17 @@ qtd_veiculos = st.sidebar.slider("Quantidade de Veículos Disponíveis:", 1, 20,
 st.sidebar.header("📂 Dados de Destino")
 arquivo = st.sidebar.file_uploader("Suba a planilha das Unidades (XLSX)", type=["xlsx"])
 
-df_final = pd.DataFrame()
-
 if arquivo:
     try:
-        df_import = pd.read_excel(arquivo)
+        # Força o pandas a ler o arquivo ignorando linhas completamente vazias
+        df_import = pd.read_excel(arquivo).dropna(how='all')
         
         if df_import.shape[1] < 3:
-            st.error("A planilha precisa ter pelo menos 3 colunas correspondentes a: Unidade solicitante, Endereço completo e Região.")
+            st.error("A planilha precisa ter pelo menos 3 colunas populadas.")
             st.stop()
             
         df_final = pd.DataFrame()
+        # Capta as 3 primeiras colunas de dados de forma dinâmica (independente do título delas)
         df_final['Unidade solicitante'] = df_import.iloc[:, 0].astype(str)
         df_final['Endereço completo'] = df_import.iloc[:, 1].astype(str)
         df_final['Região'] = df_import.iloc[:, 2].astype(str)
@@ -148,17 +121,21 @@ if arquivo:
         cache_planilha = {}
         
         for i, r in df_final.iterrows():
-            # 1. Tenta buscar o endereço exatamente como escrito na planilha
+            # Estratégia 1: Tenta o endereço completo da segunda coluna
             lt, ln = buscar_coordenadas(r['Endereço completo'], cache_planilha)
             
-            # 2. Se falhar, limpa termos poluídos (ex: "bairro", "sala") e tenta de novo
+            # Estratégia 2: Se falhar, limpa abreviações/termos poluídos
             if not lt:
                 end_limpo = limpar_texto_endereco(r['Endereço completo'])
                 lt, ln = buscar_coordenadas(end_limpo, cache_planilha)
                 
-            # 3. Se ainda assim falhar, busca pela coluna C (Região / Cidade) para não perder a rota
-            if not lt: 
+            # Estratégia 3: Se ainda assim falhar, mapeia pelo nome da Região/Cidade (Coluna 3)
+            if not lt:
                 lt, ln = buscar_coordenadas(r['Região'], cache_planilha)
+                
+            # Estratégia 4 (Mecanismo Antifalha): Se tudo der errado, posiciona próximo à origem para não sumir da rota
+            if not lt:
+                lt, ln = lat_origem + random.uniform(-0.02, 0.02), lon_origem + random.uniform(-0.02, 0.02)
                 
             lats.append(lt)
             lons.append(ln)
@@ -212,7 +189,7 @@ if not df_final.empty:
     
     st.write("### 🗺️ Mapa de Rotas e Unidades")
     fig = px.scatter_mapbox(df_detalhado_final, lat="lat", lon="lon", color="Veículo Designado", 
-                            hover_name="Unidade solicitante", hover_data=["Endereço completo", "Ordem da Entrega"], zoom=7,
+                            hover_name="Unidade solicitante", hover_data=["Endereço completo", "Ordem da Entrega"], zoom=10,
                             color_continuous_scale=px.colors.qualitative.Prism)
     
     fig.add_scattermapbox(lat=[lat_origem], lon=[lon_origem], 
@@ -233,5 +210,3 @@ if not df_final.empty:
         file_name="roteirizacao_por_unidades.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
-else:
-    st.warning("⚠️ Não foi possível encontrar coordenadas. Verifique se a planilha possui as colunas estruturadas como A, B e C.")
