@@ -11,23 +11,32 @@ import random
 # 1. CONFIGURAÇÃO DA PÁGINA
 st.set_page_config(page_title="Roteirização por Unidades", page_icon="📍", layout="wide")
 
-# --- VALORES PADRÃO (CONTAGEM) ---
-LAT_PADRAO = -19.9203
-LON_PADRAO = -44.0466
-ENDERECO_PADRAO = "Rua Simão Antônio, 149, Contagem - MG"
-
-# --- FUNÇÕES TÉCNICAS ---
-@st.cache_data(show_spinner=False)
-def buscar_coordenadas(local):
-    if not local: return None, None
+# --- FUNÇÕES TÉCNICAS OTIMIZADAS ---
+def buscar_coordenadas(local, cache_local):
+    if not local or pd.isna(local): 
+        return None, None
+    
+    local_str = str(local).strip()
+    
+    # Se o endereço já foi buscado nesta rodada, devolve direto do cache (ganho de velocidade)
+    if local_str in cache_local:
+        return cache_local[local_str]
+        
     try:
         agente = f"rot_unidades_{random.randint(1000, 9999)}"
         geolocator = Nominatim(user_agent=agente, timeout=10)
-        location = geolocator.geocode(f"{local}, Minas Gerais, Brazil")
+        location = geolocator.geocode(f"{local_str}, Minas Gerais, Brazil")
+        
         if location:
-            return location.latitude, location.longitude
+            coordenadas = (location.latitude, location.longitude)
+            cache_local[local_str] = coordenadas
+            # Só pausa se realmente precisou ir à internet buscar
+            time.sleep(1.0) 
+            return coordenadas
     except:
         pass
+        
+    cache_local[local_str] = (None, None)
     return None, None
 
 def calcular_distancia(lat1, lon1, lat2, lon2):
@@ -68,25 +77,25 @@ st.markdown("Defina o ponto de partida, carregue a planilha de destinos e otimiz
 
 # --- SIDEBAR: CONFIGURAÇÃO DE PARTIDA ---
 st.sidebar.header("⚙️ Configurações de Partida")
-tipo_partida = st.sidebar.radio("Endereço de Partida:", ["Usar Base Contagem (Padrão)", "Digitar Outro Endereço"])
 
-if tipo_partida == "Usar Base Contagem (Padrão)":
-    lat_origem = LAT_PADRAO
-    lon_origem = LON_PADRAO
-    endereco_origem = ENDERECO_PADRAO
-    st.sidebar.success(f"📍 **Origem:**\n{endereco_origem}")
+endereco_input = st.sidebar.text_input(
+    "Digite o endereço completo de partida:", 
+    value="", 
+    placeholder="Ex: Praça da Liberdade, Belo Horizonte - MG"
+)
+
+lat_origem, lon_origem = None, None
+
+if endereco_input:
+    cache_partida = {}
+    with st.sidebar.spinner("Buscando coordenadas do ponto de partida..."):
+        lat_origem, lon_origem = buscar_coordenadas(endereco_input, cache_partida)
+    if lat_origem:
+        st.sidebar.success("📍 **Origem Localizada com Sucesso!**")
+    else:
+        st.sidebar.error("Não conseguimos encontrar coordenadas para este endereço de partida. Verifique a grafia.")
 else:
-    endereco_input = st.sidebar.text_input("Digite o endereço completo de partida:", value="Praça da Liberdade, Belo Horizonte - MG")
-    if endereco_input:
-        with st.sidebar.spinner("Buscando coordenadas do ponto de partida..."):
-            lat_origem, lon_origem = buscar_coordenadas(endereco_input)
-        if lat_origem:
-            st.sidebar.success(f"📍 **Origem Localizada com Sucesso!**")
-            endereco_origem = endereco_input
-        else:
-            st.sidebar.error("Não encontramos esse endereço. Usando Contagem temporariamente.")
-            lat_origem, lon_origem = LAT_PADRAO, LON_PADRAO
-            endereco_origem = ENDERECO_PADRAO
+    st.sidebar.warning("⚠️ Insira um endereço de partida para liberar o processamento.")
 
 st.sidebar.divider()
 qtd_veiculos = st.sidebar.slider("Quantidade de Veículos Disponíveis:", 1, 20, 3)
@@ -97,7 +106,8 @@ arquivo = st.sidebar.file_uploader("Suba a planilha das Unidades (XLSX)", type=[
 
 df_final = pd.DataFrame()
 
-if arquivo:
+# O sistema só avança se o usuário preencheu a origem e subiu o arquivo
+if arquivo and lat_origem:
     try:
         df_import = pd.read_excel(arquivo)
         
@@ -110,27 +120,34 @@ if arquivo:
         df_final['Endereço completo'] = df_import.iloc[:, 1].astype(str)
         df_final['Região'] = df_import.iloc[:, 2].astype(str)
         
-        st.info(f"📍 Localizando destinos... (Processando {len(df_final)} endereços via Geopy)")
+        st.info(f"📍 Localizando destinos... (Processando {len(df_final)} endereços)")
         barra = st.progress(0)
         lats, lons = [], []
         
+        # Dicionário de cache local exclusivo para esta planilha de destinos
+        cache_planilha = {}
+        
         for i, r in df_final.iterrows():
-            lt, ln = buscar_coordenadas(r['Endereço completo'])
+            # Tenta pelo endereço completo
+            lt, ln = buscar_coordenadas(r['Endereço completo'], cache_planilha)
+            # Se falhar, tenta pela região/cidade
             if not lt: 
-                lt, ln = buscar_coordenadas(r['Região'])
+                lt, ln = buscar_coordenadas(r['Região'], cache_planilha)
                 
             lats.append(lt)
             lons.append(ln)
             barra.progress((i+1)/len(df_final))
-            time.sleep(1.0)
             
         df_final['lat'], df_final['lon'] = lats, lons
         
     except Exception as e:
         st.error(f"Erro ao processar o arquivo Excel: {e}")
         st.stop()
-else:
+elif not arquivo:
     st.info("👋 Aguardando o upload da planilha Excel (.xlsx) na barra lateral para iniciar o planejamento.")
+    st.stop()
+elif not lat_origem:
+    st.info("💡 Por favor, defina um endereço válido de partida na barra lateral para iniciar.")
     st.stop()
 
 # --- PROCESSAMENTO DE ROTAS POR VEÍCULO ---
@@ -193,3 +210,5 @@ if not df_final.empty:
         file_name="roteirizacao_por_unidades.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
+else:
+    st.warning("⚠️ Não foi possível geolocalizar nenhum dos destinos enviados na planilha.")
