@@ -17,7 +17,6 @@ def buscar_coordenadas(local, cache_local):
         return None, None
     
     local_str = str(local).strip()
-    
     if local_str in cache_local:
         return cache_local[local_str]
         
@@ -33,6 +32,39 @@ def buscar_coordenadas(local, cache_local):
             return coordenadas
     except:
         pass
+        
+    return None, None
+
+def buscar_partida_com_fallback(endereco_original, cache):
+    """Tenta várias combinações de endereço para garantir que o app nunca trave"""
+    if not endereco_original:
+        return None, None
+        
+    # 1ª Tentativa: Endereço original completo
+    lat, lon = buscar_coordenadas(endereco_original, cache)
+    if lat: return lat, lon
+    
+    # Limpeza de termos comuns que quebram o Nominatim (ex: "Bairro Indaiá" -> "Indaiá")
+    endereco_limpo = endereco_original.lower().replace("bairro ", "").replace("br-", "rodovia br ")
+    
+    # 2ª Tentativa: Endereço limpo
+    lat, lon = buscar_coordenadas(endereco_limpo, cache)
+    if lat: return lat, lon
+    
+    # 3ª Tentativa: Tenta quebrar por vírgulas e pegar apenas os dados principais (Rua + Cidade)
+    if ',' in endereco_original:
+        partes = endereco_original.split(',')
+        if len(partes) > 1:
+            # Pega a primeira parte (Rua) e a última parte (Cidade)
+            rua_cidade = f"{partes[0].strip()}, {partes[-1].strip()}"
+            lat, lon = buscar_coordenadas(rua_cidade, cache)
+            if lat: return lat, lon
+
+    # 4ª Tentativa (Último caso): Se nada funcionar, puxa BH para não travar o processamento
+    lat, lon = buscar_coordenadas("Belo Horizonte - MG", cache)
+    if lat:
+        st.sidebar.warning("⚠️ Endereço exato não localizado. Usando centro de BH como aproximação.")
+        return lat, lon
         
     return None, None
 
@@ -85,20 +117,10 @@ lat_origem, lon_origem = None, None
 if endereco_input:
     cache_partida = {}
     with st.sidebar.spinner("Buscando coordenadas do ponto de partida..."):
-        # 1ª Tentativa: Endereço completo digitado
-        lat_origem, lon_origem = buscar_coordenadas(endereco_input, cache_partida)
-        
-        # 2ª Tentativa (Segurança): Se falhar, tenta buscar removendo o número para não travar o app
-        if not lat_origem and ',' in endereco_input:
-            partes = endereco_input.split(',')
-            if len(partes) > 1:
-                endereco_segurança = partes[0] + ", " + partes[-1] # Pega o nome da rua + cidade/estado
-                lat_origem, lon_origem = buscar_coordenadas(endereco_segurança, cache_partida)
+        lat_origem, lon_origem = buscar_partida_com_fallback(endereco_input, cache_partida)
 
     if lat_origem:
-        st.sidebar.success("📍 **Origem Localizada com Sucesso!**")
-    else:
-        st.sidebar.error("Não conseguimos mapear este endereço. Tente incluir o Bairro ou use o formato: Rua, Bairro, Cidade - MG")
+        st.sidebar.success("📍 **Origem Definida!**")
 else:
     st.sidebar.warning("⚠️ Insira um endereço de partida para liberar o processamento.")
 
@@ -131,7 +153,15 @@ if arquivo and lat_origem:
         cache_planilha = {}
         
         for i, r in df_final.iterrows():
+            # Tenta pelo endereço completo
             lt, ln = buscar_coordenadas(r['Endereço completo'], cache_planilha)
+            
+            # Segurança extra: se falhar o endereço da planilha, limpa a palavra "bairro" dele
+            if not lt and "bairro" in r['Endereço completo'].lower():
+                endereco_limpo_linha = r['Endereço completo'].lower().replace("bairro ", "")
+                lt, ln = buscar_coordenadas(endereco_limpo_linha, cache_planilha)
+                
+            # Se ainda assim falhar, tenta pela região/cidade
             if not lt: 
                 lt, ln = buscar_coordenadas(r['Região'], cache_planilha)
                 
