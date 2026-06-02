@@ -18,7 +18,6 @@ def buscar_coordenadas(local, cache_local):
     
     local_str = str(local).strip()
     
-    # Se o endereço já foi buscado nesta rodada, devolve direto do cache (ganho de velocidade)
     if local_str in cache_local:
         return cache_local[local_str]
         
@@ -30,13 +29,11 @@ def buscar_coordenadas(local, cache_local):
         if location:
             coordenadas = (location.latitude, location.longitude)
             cache_local[local_str] = coordenadas
-            # Só pausa se realmente precisou ir à internet buscar
             time.sleep(1.0) 
             return coordenadas
     except:
         pass
         
-    cache_local[local_str] = (None, None)
     return None, None
 
 def calcular_distancia(lat1, lon1, lat2, lon2):
@@ -51,7 +48,6 @@ def formatar_tempo(km):
     return f"{int(horas//1)}h {int((horas%1)*60)}min"
 
 def ordenar_por_proximidade(lat_inicio, lon_inicio, pontos_df):
-    """Ordena os pontos sequencialmente pelo vizinho mais próximo"""
     df_copia = pontos_df.copy()
     rota_ordenada = []
     
@@ -81,7 +77,7 @@ st.sidebar.header("⚙️ Configurações de Partida")
 endereco_input = st.sidebar.text_input(
     "Digite o endereço completo de partida:", 
     value="", 
-    placeholder="Ex: Praça da Liberdade, Belo Horizonte - MG"
+    placeholder="Ex: Rua Boaventura, 401, Indaiá, Belo Horizonte - MG"
 )
 
 lat_origem, lon_origem = None, None
@@ -89,11 +85,20 @@ lat_origem, lon_origem = None, None
 if endereco_input:
     cache_partida = {}
     with st.sidebar.spinner("Buscando coordenadas do ponto de partida..."):
+        # 1ª Tentativa: Endereço completo digitado
         lat_origem, lon_origem = buscar_coordenadas(endereco_input, cache_partida)
+        
+        # 2ª Tentativa (Segurança): Se falhar, tenta buscar removendo o número para não travar o app
+        if not lat_origem and ',' in endereco_input:
+            partes = endereco_input.split(',')
+            if len(partes) > 1:
+                endereco_segurança = partes[0] + ", " + partes[-1] # Pega o nome da rua + cidade/estado
+                lat_origem, lon_origem = buscar_coordenadas(endereco_segurança, cache_partida)
+
     if lat_origem:
         st.sidebar.success("📍 **Origem Localizada com Sucesso!**")
     else:
-        st.sidebar.error("Não conseguimos encontrar coordenadas para este endereço de partida. Verifique a grafia.")
+        st.sidebar.error("Não conseguimos mapear este endereço. Tente incluir o Bairro ou use o formato: Rua, Bairro, Cidade - MG")
 else:
     st.sidebar.warning("⚠️ Insira um endereço de partida para liberar o processamento.")
 
@@ -106,7 +111,6 @@ arquivo = st.sidebar.file_uploader("Suba a planilha das Unidades (XLSX)", type=[
 
 df_final = pd.DataFrame()
 
-# O sistema só avança se o usuário preencheu a origem e subiu o arquivo
 if arquivo and lat_origem:
     try:
         df_import = pd.read_excel(arquivo)
@@ -124,13 +128,10 @@ if arquivo and lat_origem:
         barra = st.progress(0)
         lats, lons = [], []
         
-        # Dicionário de cache local exclusivo para esta planilha de destinos
         cache_planilha = {}
         
         for i, r in df_final.iterrows():
-            # Tenta pelo endereço completo
             lt, ln = buscar_coordenadas(r['Endereço completo'], cache_planilha)
-            # Se falhar, tenta pela região/cidade
             if not lt: 
                 lt, ln = buscar_coordenadas(r['Região'], cache_planilha)
                 
